@@ -13,7 +13,7 @@ function normalizeUrl(input: string): string {
 }
 
 function generateFfmpegCommands(streamUrl: string, title: string) {
-  const safeTitle = title.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 30) || 'output';
+  const safeTitle = (title || 'output').replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 30) || 'output';
   return {
     download: `ffmpeg -i "${streamUrl}" -c copy -bsf:a aac_adtstoasc "${safeTitle}.mp4"`,
     reencode: `ffmpeg -i "${streamUrl}" -c:v libx264 -crf 23 -c:a aac -b:a 192k "${safeTitle}_reencoded.mp4"`,
@@ -41,15 +41,31 @@ function generateEmbedCodes(streamUrl: string, title: string, manifestUrl: strin
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    let body: any = {};
+    try {
+      body = await req.json();
+    } catch (_) {
+      return NextResponse.json({ error: 'Request body must be valid JSON.' }, { status: 400 });
+    }
+
     let { url, customCategory } = body;
 
-    if (!url || typeof url !== 'string') {
+    if (!url || typeof url !== 'string' || !url.trim()) {
       return NextResponse.json({ error: 'URL parameter is required.' }, { status: 400 });
     }
 
     const targetUrl = normalizeUrl(url);
-    const parsedUrl = new URL(targetUrl);
+
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(targetUrl);
+    } catch (_) {
+      return NextResponse.json(
+        { error: 'URL tidak valid. Mohon periksa kembali alamat website (contoh: https://youtubio.elfhosted.com).' },
+        { status: 400 }
+      );
+    }
+
     const origin = parsedUrl.origin;
 
     let foundManifest = false;
@@ -67,7 +83,7 @@ export async function POST(req: NextRequest) {
     // Helper fetch with timeout
     const fetchWithTimeout = async (target: string, headers = {}) => {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 8000);
+      const timer = setTimeout(() => controller.abort(), 6000);
       try {
         const res = await fetch(target, {
           headers: {
@@ -76,6 +92,7 @@ export async function POST(req: NextRequest) {
             ...headers,
           },
           signal: controller.signal,
+          redirect: 'follow',
         });
         clearTimeout(timer);
         return res;
@@ -112,7 +129,9 @@ export async function POST(req: NextRequest) {
             manifestSource = 'json_root';
           } catch (_) {}
         } else {
-          htmlText = await res.text();
+          try {
+            htmlText = await res.text();
+          } catch (_) {}
         }
       }
 
@@ -122,17 +141,19 @@ export async function POST(req: NextRequest) {
                                   htmlText.match(/<link[^>]+href=["']([^"']+)["'][^>]+rel=["']manifest["']/i);
         if (manifestLinkMatch && manifestLinkMatch[1]) {
           const rawHref = manifestLinkMatch[1];
-          manifestUrl = new URL(rawHref, targetUrl).href;
-          foundManifest = true;
-          manifestSource = 'link_header';
+          try {
+            manifestUrl = new URL(rawHref, targetUrl).href;
+            foundManifest = true;
+            manifestSource = 'link_header';
 
-          // Try fetching the discovered manifest URL
-          const mRes = await fetchWithTimeout(manifestUrl);
-          if (mRes && mRes.ok) {
-            try {
-              manifestJsonRaw = await mRes.json();
-            } catch (_) {}
-          }
+            // Try fetching the discovered manifest URL
+            const mRes = await fetchWithTimeout(manifestUrl);
+            if (mRes && mRes.ok) {
+              try {
+                manifestJsonRaw = await mRes.json();
+              } catch (_) {}
+            }
+          } catch (_) {}
         }
       }
 
@@ -161,9 +182,11 @@ export async function POST(req: NextRequest) {
       channelName = manifestJsonRaw.author || manifestJsonRaw.channel_name || manifestJsonRaw.publisher || manifestJsonRaw.short_name || parsedUrl.hostname;
 
       if (manifestJsonRaw.icons && Array.isArray(manifestJsonRaw.icons) && manifestJsonRaw.icons.length > 0) {
-        const iconSrc = manifestJsonRaw.icons[0].src;
+        const iconSrc = manifestJsonRaw.icons[0]?.src;
         if (iconSrc) {
-          thumbnailUrl = new URL(iconSrc, manifestUrl || targetUrl).href;
+          try {
+            thumbnailUrl = new URL(iconSrc, manifestUrl || targetUrl).href;
+          } catch (_) {}
         }
       }
 
@@ -208,16 +231,20 @@ export async function POST(req: NextRequest) {
 
       const ogImgMatch = htmlText.match(/<meta[^>]+(?:property|name)=["'](?:og:image|twitter:image)["'][^>]+content=["']([^"']+)["']/i);
       if (ogImgMatch && ogImgMatch[1] && !thumbnailUrl) {
-        thumbnailUrl = new URL(ogImgMatch[1], targetUrl).href;
+        try {
+          thumbnailUrl = new URL(ogImgMatch[1], targetUrl).href;
+        } catch (_) {}
       }
 
-      // Extract video streams from HTML (<video src>, <source src>, og:video, m3u8 regex, youtube embeds)
+      // Extract video streams from HTML
       const streamUrlsFound = new Set<string>();
 
       // 1. OG video
       const ogVideoMatch = htmlText.match(/<meta[^>]+property=["']og:video(?::url)?["'][^>]+content=["']([^"']+)["']/i);
       if (ogVideoMatch && ogVideoMatch[1]) {
-        streamUrlsFound.add(new URL(ogVideoMatch[1], targetUrl).href);
+        try {
+          streamUrlsFound.add(new URL(ogVideoMatch[1], targetUrl).href);
+        } catch (_) {}
       }
 
       // 2. HTML5 Video / Source tags
@@ -256,7 +283,6 @@ export async function POST(req: NextRequest) {
         else if (stUrl.includes('.mpd')) fmt = 'dash';
         else if (stUrl.includes('youtube') || stUrl.includes('youtu.be')) fmt = 'youtube';
 
-        // Avoid duplication
         if (!videoStreams.some(s => s.url === stUrl)) {
           videoStreams.push({
             id: `html-stream-${i}`,
@@ -269,20 +295,21 @@ export async function POST(req: NextRequest) {
     }
 
     // Fallbacks if metadata is still empty
+    const host = parsedUrl.hostname || 'youtubio.elfhosted.com';
     if (!pageTitle) {
-      pageTitle = parsedUrl.hostname.replace('www.', '') + ' Video Stream';
+      pageTitle = host.replace('www.', '') + ' Video Stream';
     }
     if (!channelName) {
-      channelName = parsedUrl.hostname.split('.')[0].toUpperCase() || 'Youtubio Channel';
+      channelName = host.split('.')[0].toUpperCase() || 'Youtubio Channel';
     }
     if (!description) {
-      description = `Koleksi video stream & manifest media dari ${channelName} (${parsedUrl.hostname}).`;
+      description = `Koleksi video stream & manifest media dari ${channelName} (${host}).`;
     }
     if (!thumbnailUrl) {
-      thumbnailUrl = `https://picsum.photos/seed/${encodeURIComponent(parsedUrl.hostname)}/800/450`;
+      thumbnailUrl = `https://picsum.photos/seed/${encodeURIComponent(host)}/800/450`;
     }
 
-    // Default sample stream fallback if no stream extracted from dead/empty site
+    // Default sample stream fallback if no stream extracted
     if (videoStreams.length === 0) {
       if (targetUrl.includes('youtubio') || targetUrl.includes('elfhosted')) {
         videoStreams.push({
@@ -307,16 +334,35 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Optional Gemini AI enhancement for auto-categorizing and generating channel tags
-    if (process.env.GEMINI_API_KEY) {
-      try {
-        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const prompt = `Analyze this video streaming website metadata and categorize the channel.
+    // Smart Heuristic Categorization Fallback
+    const heuristicCategorize = (text: string): string => {
+      const lower = text.toLowerCase();
+      if (/game|gaming|esport|streamer|twitch|playstation|xbox|nintendo|minecraft|roblox/i.test(lower)) return 'Gaming';
+      if (/music|song|audio|track|album|band|singer|concert|instrumental/i.test(lower)) return 'Music';
+      if (/tech|technology|code|developer|software|programming|linux|ai|android|apple/i.test(lower)) return 'Tech';
+      if (/movie|film|anime|show|series|cinema|entertainment|comedy|drama/i.test(lower)) return 'Entertainment';
+      if (/news|berita|breaking|media|press|report|politics|journal/i.test(lower)) return 'News';
+      if (/education|tutorial|course|learn|science|math|lecture|school|university/i.test(lower)) return 'Education';
+      if (/vlog|daily|lifestyle|travel|food|cooking|family/i.test(lower)) return 'Vlog';
+      return 'General';
+    };
+
+    if (detectedCategory === 'General' || !customCategory) {
+      const heuristicResult = heuristicCategorize(`${pageTitle} ${channelName} ${description} ${targetUrl}`);
+      if (heuristicResult !== 'General') {
+        detectedCategory = heuristicResult;
+      }
+    }
+
+    // Optional Gemini AI enhancement with resilient fallback models
+    if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'MY_GEMINI_API_KEY') {
+      const modelsToTry = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-3.5-flash'];
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const prompt = `Analyze this video streaming website metadata and categorize the channel.
 URL: ${targetUrl}
 Title: ${pageTitle}
 Channel: ${channelName}
 Description: ${description}
-Manifest Data: ${JSON.stringify(manifestJsonRaw || {}).substring(0, 500)}
 
 Respond with JSON format only:
 {
@@ -325,26 +371,30 @@ Respond with JSON format only:
   "tags": ["tag1", "tag2", "tag3"]
 }`;
 
-        const aiResponse = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: prompt,
-        });
+      for (const modelName of modelsToTry) {
+        try {
+          const aiResponse = await ai.models.generateContent({
+            model: modelName,
+            contents: prompt,
+          });
 
-        if (aiResponse.text) {
-          const cleanText = aiResponse.text.replace(/```json/g, '').replace(/```/g, '').trim();
-          const parsedAi = JSON.parse(cleanText);
-          if (parsedAi.category && !customCategory) {
-            detectedCategory = parsedAi.category;
+          if (aiResponse.text) {
+            const cleanText = aiResponse.text.replace(/```json/g, '').replace(/```/g, '').trim();
+            const parsedAi = JSON.parse(cleanText);
+            if (parsedAi.category && !customCategory) {
+              detectedCategory = parsedAi.category;
+            }
+            if (parsedAi.tags && Array.isArray(parsedAi.tags)) {
+              tags = Array.from(new Set([...tags, ...parsedAi.tags]));
+            }
+            if (parsedAi.refinedTitle && parsedAi.refinedTitle.length > 3) {
+              pageTitle = parsedAi.refinedTitle;
+            }
+            break; // Succeeded, exit retry loop
           }
-          if (parsedAi.tags && Array.isArray(parsedAi.tags)) {
-            tags = Array.from(new Set([...tags, ...parsedAi.tags]));
-          }
-          if (parsedAi.refinedTitle && parsedAi.refinedTitle.length > 3) {
-            pageTitle = parsedAi.refinedTitle;
-          }
+        } catch (_) {
+          // Continue to next fallback model or heuristic result without logging noisy errors
         }
-      } catch (geminiError) {
-        console.warn('Gemini categorization skipped:', geminiError);
       }
     }
 
@@ -354,7 +404,7 @@ Respond with JSON format only:
 
     const result: ManifestData = {
       url: targetUrl,
-      manifestUrl,
+      manifestUrl: manifestUrl || (foundManifest ? `${origin}/manifest.json` : null),
       foundManifest,
       manifestSource,
       title: pageTitle,
@@ -377,7 +427,7 @@ Respond with JSON format only:
         ],
         source_parsed: targetUrl,
       },
-      siteName: parsedUrl.hostname,
+      siteName: host,
       analyzedAt: new Date().toISOString(),
     };
 
@@ -390,8 +440,8 @@ Respond with JSON format only:
   } catch (err: any) {
     console.error('Error analyzing URL:', err);
     return NextResponse.json(
-      { error: err.message || 'An error occurred while analyzing the URL.' },
-      { status: 500 }
+      { success: false, error: err.message || 'Terjadi kesalahan saat mengekstrak URL.' },
+      { status: 400 }
     );
   }
 }

@@ -15,14 +15,7 @@ import { getTranslation } from '@/lib/i18n';
 import { Sparkles, AlertCircle, CheckCircle2 } from 'lucide-react';
 
 export default function Home() {
-  const [currentLang, setCurrentLang] = useState<Language>(() => {
-    if (typeof window !== 'undefined') {
-      const savedLang = localStorage.getItem('youtubio_lang') as Language;
-      if (savedLang === 'id' || savedLang === 'en') return savedLang;
-    }
-    return 'id';
-  });
-
+  const [currentLang, setCurrentLang] = useState<Language>('id');
   const [activeTab, setActiveTab] = useState<'analyzer' | 'history' | 'ffmpeg' | 'guide'>('analyzer');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -32,17 +25,26 @@ export default function Home() {
   const [ffmpegCmds, setFfmpegCmds] = useState<any>(null);
   const [embedCodes, setEmbedCodes] = useState<any>(null);
 
-  const [history, setHistory] = useState<HistoryItem[]>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const savedHist = localStorage.getItem('youtubio_history');
-        if (savedHist) return JSON.parse(savedHist);
-      } catch (e) {}
-    }
-    return [];
-  });
+  const [history, setHistory] = useState<HistoryItem[]>([]);
 
   const t = getTranslation(currentLang);
+
+  // Load client settings and history from localStorage safely after mount to avoid hydration mismatch
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try {
+        const savedLang = localStorage.getItem('youtubio_lang') as Language;
+        if (savedLang === 'id' || savedLang === 'en') {
+          setCurrentLang(savedLang);
+        }
+        const savedHist = localStorage.getItem('youtubio_history');
+        if (savedHist) {
+          setHistory(JSON.parse(savedHist));
+        }
+      } catch (e) {}
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
 
   const saveHistory = (items: HistoryItem[]) => {
     setHistory(items);
@@ -125,13 +127,10 @@ export default function Home() {
 
   // Auto load initial default sample for instant preview on mount
   useEffect(() => {
-    let ignore = false;
-    if (!ignore) {
+    const timer = setTimeout(() => {
       handleAnalyze('https://youtubio.elfhosted.com');
-    }
-    return () => {
-      ignore = true;
-    };
+    }, 0);
+    return () => clearTimeout(timer);
   }, [handleAnalyze]);
 
   const handleCategoryUpdate = (newCategory: string) => {
