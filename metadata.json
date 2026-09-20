@@ -1,0 +1,6 @@
+{
+  "name": "Youtubio",
+  "description": "Ekstrak link manifest.json, pratinjau video, generator perintah FFmpeg, dan analisis channel Youtubio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
